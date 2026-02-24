@@ -1,0 +1,42 @@
+# =========================
+# Web UI - General
+# =========================
+.DS_Store
+.env
+.env.local
+.env.*.local
+
+# =========================
+# Backend (Python / FastAPI)
+# =========================
+backend/venv/
+backend/__pycache__/
+backend/*.py[cod]
+backend/*$py.class
+backend/.pytest_cache/
+backend/.coverage
+backend/htmlcov/
+backend/.mypy_cache/
+
+# Runtime data & outputs
+backend/webui_outputs/
+backend/*.log
+
+# =========================
+# Frontend (Node / React / Vite)
+# =========================
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/build/
+frontend/.npm/
+frontend/.yarn/
+frontend/*.tsbuildinfo
+
+# Frontend Logs
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+webui_outputs/

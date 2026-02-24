@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary-50: #f0fdf4;
+  --color-primary-100: #dcfce7;
+  --color-primary-500: #22c55e;
+  --color-primary-600: #16a34a;
+
+  --color-surface-translucent: rgba(255, 255, 255, 0.7);
+  --color-surface-dark-translucent: rgba(15, 23, 42, 0.6);
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    background-image:
+      radial-gradient(at 0% 0%, hsla(113, 85%, 85%, 1) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, hsla(205, 87%, 85%, 1) 0px, transparent 50%);
+    background-attachment: fixed;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-surface-translucent backdrop-blur-xl border border-white/20 shadow-xl;
+  }
+
+  .glass-dark {
+    @apply bg-surface-dark-translucent backdrop-blur-xl border border-white/10 shadow-xl text-white;
+  }
+}

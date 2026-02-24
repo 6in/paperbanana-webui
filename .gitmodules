@@ -1,0 +1,3 @@
+[submodule "paperbanana"]
+	path = paperbanana
+	url = https://github.com/llmsresearch/paperbanana.git
