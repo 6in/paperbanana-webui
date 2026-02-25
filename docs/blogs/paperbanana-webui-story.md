@@ -11,6 +11,34 @@
 
 ---
 
+## 🧭 PaperBananaの処理フロー（まずここだけ見ればOK）
+
+```mermaid
+flowchart TD
+    A[ユーザー入力<br/>source_context + intent] --> B{入力最適化を有効化?}
+    B -- Yes --> B1[Context Enricher]
+    B -- Yes --> B2[Caption Sharpener]
+    B1 --> C[統合プロンプト]
+    B2 --> C
+    B -- No --> C
+
+    C --> D[Retriever<br/>参考図を検索]
+    D --> E[Planner<br/>図の詳細説明を生成]
+    E --> F[Stylist<br/>見た目を整形]
+
+    F --> G[Visualizer<br/>画像生成]
+    G --> H[Critic<br/>品質評価]
+    H --> I{修正が必要?}
+    I -- Yes --> F
+    I -- No --> J[final_output.png]
+
+    J --> K[メタデータ保存<br/>run_id / tokens / cost / logs]
+```
+
+> このループ（Visualizer ↔ Critic）を回すことで、図の品質を段階的に改善します。
+
+---
+
 ## 🎨 コンセプト：直感的で「Wow!」な体験を
 
 今回のWeb UI開発のコンセプトは、ズバリ **「Glassmorphism（グラスモーフィズム）」** と **「モダンでプレミアムな体験」** です！✨
@@ -24,6 +52,28 @@
 
 > 📸 **ここに挿絵を挿入！**
 > *コメント：開発したWeb UIの全体画面のキャプチャ（チャット欄とプレビュー画面がわかる綺麗なスクリーンショット）を貼ると効果的です！*
+
+```mermaid
+flowchart LR
+    User[ユーザー] --> UI[Web UI<br/>React + Vite]
+    UI -->|WebSocket /api/ws/generate| API[Web API<br/>FastAPI]
+    UI -->|HTTP /api/test-token| API
+
+    subgraph PB[PaperBanana Core（本体）]
+      direction TB
+      P0[Input Optimizer]
+      P1[Retriever / Planner / Stylist]
+      P2[Visualizer / Critic Loop]
+      P0 --> P1 --> P2
+    end
+
+    API -->|pipeline.generate()| PB
+    PB -->|画像 / ログ / トークン使用量| API
+    API -->|リアルタイム配信| UI
+    UI -->|プレビュー / コスト表示| User
+```
+> この構造では、**PaperBanana本体は「生成エンジン」**、Web UIは「操作と可視化レイヤー」という役割分担です。
+
 
 ---
 
@@ -109,6 +159,54 @@ sequenceDiagram
 
 ---
 
+## 💸 料金表示処理の死闘：なぜずっと `$0.0000` だったのか？
+
+実は、今回いちばん泥臭くて、でも学びが大きかったのが **「コスト表示の不具合」** でした。  
+画面上ではずっと `$0.0000`。でも実際にはAPIは動いていて、トークンは消費している…。  
+「これは表示の問題か？取得の問題か？集計の問題か？」を1つずつ潰していく戦いでした🔥
+
+### 🧪 切り分け1：まず「疎通テストAPI」を作る
+
+図を毎回生成するとコストが重いので、軽量な `/api/test-token` を追加。  
+**PaperBanana VLM → structlog → Queue → token parse → cost calc** の本番と同じ経路を、最小コストで検証できるようにしました。
+
+さらにフロントにも「API疎通」ボタンを追加し、結果をポップアップではなくログ欄に表示。  
+これで「どこで値が落ちているか」をUI上で即確認できるようになりました。
+
+### 🧩 根本原因は1つではなかった
+
+調査すると、原因は複数が連鎖していました。
+
+1. **表示桁数の罠**  
+   実コストが `$0.000001` でも、表示が `.toFixed(4)` だと `$0.0000` に見える。
+
+2. **ログの取り方の罠（structlog）**  
+   文字列フォーマットの出し方だと、トークンがイベントとして正しく拾えないケースがあり、`TOKEN_USAGE` 抽出が不安定だった。
+
+3. **Gemini usage_metadata の癖**  
+   モデルによっては `candidates_token_count` が `None`。  
+   `total_token_count - prompt_token_count` で補完が必要だった。
+
+4. **イベントループのブロック**  
+   `generate_content()` が同期呼び出しだと、WebSocketドレインが止まり、リアルタイム集計が進まない。
+
+5. **ドレインの早期キャンセル**  
+   finallyで即キャンセルしてしまい、キューに溜まっていたログ（=課金計算の材料）を捨てていた。
+
+### ✅ 最終的な解決
+
+* `TOKEN_USAGE` を安定して構造化ログに載せる
+* トークン抽出のフォールバックを強化（Gemini特有の形も対応）
+* `generate_content()` を `asyncio.to_thread()` 化してイベントループをブロックしない
+* キューのドレイン完了を待ってから終了する
+* 表示桁を6桁にして微小コストも可視化する
+
+その結果、ついに画面に **`💸 $0.002754`** が表示！🎉  
+ログにも `TOKEN_USAGE input_tokens=... output_tokens=...` がリアルタイムに流れ、  
+「取れているのか分からない」状態から、**「いつ・どこで・いくら使ったかが見える」状態** に到達できました。
+
+---
+
 ## 🏗️ こだわりのアーキテクチャ：Gitサブモジュールによる綺麗な分離
 
 最後に、開発者向けのちょっとマニアックな工夫もご紹介します！🛠️
@@ -137,6 +235,9 @@ graph TD
 
 * **メリット1**：本家のクリーンなソースコードを一切汚さずにUI開発ができる！
 * **メリット2**：本家にアップデートがあっても、コマンド一発で簡単に追従できる！
+
+さらに運用面では、最終的に **PaperBanana本体をForkしたリポジトリを自分たちの`origin`として利用**する形にしました。  
+これにより、Web UI側の改修に必要な本体パッチ（例：トークン計測や非同期化の修正）を安全に管理しつつ、必要なタイミングで本家の更新を取り込めるようになりました。
 
 「UIはUI、コアエンジンはコアエンジン」と分離（Complete Separation Architecture）することで、安全で保守性の高いイケてるプロジェクト構成になりました😎✨
 

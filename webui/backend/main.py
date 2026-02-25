@@ -13,14 +13,19 @@ Architecture:
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import time
+from pathlib import Path
+from datetime import datetime, timezone
 from contextvars import ContextVar
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import yaml
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from paperbanana.core.pipeline import PaperBananaPipeline
 from paperbanana.core.types import GenerationInput, DiagramType
@@ -35,9 +40,159 @@ load_dotenv()
 
 app = FastAPI(title="PaperBanana Web UI API")
 
+WEBUI_BASE_PATH = os.getenv("WEBUI_BASE_PATH", "/paper-banana-webui").strip()
+if WEBUI_BASE_PATH in {"", "/"}:
+    WEBUI_BASE_PATH = ""
+else:
+    WEBUI_BASE_PATH = "/" + WEBUI_BASE_PATH.strip("/")
+
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+AUTH_ALLOWED_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv("AUTH_ALLOWED_DOMAINS", "").split(",")
+    if d.strip()
+}
+AUTH_EMAIL_RULES_FILE = os.getenv("AUTH_EMAIL_RULES_FILE", "").strip()
+AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "email").strip() or "email"
+AUTH_COOKIE_MAX_AGE_SECONDS = int(os.getenv("AUTH_COOKIE_MAX_AGE_SECONDS", "604800"))
+AUTH_STORAGE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+
+
+def with_base(path: str) -> str:
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{WEBUI_BASE_PATH}{path}" if WEBUI_BASE_PATH else path
+
+
+class GoogleVerifyRequest(BaseModel):
+    id_token: str
+
+
+def _normalize_email(email: Optional[str]) -> Optional[str]:
+    if not email:
+        return None
+    return email.strip().lower()
+
+
+def _normalize_email_set(values: object) -> set[str]:
+    if not isinstance(values, list):
+        return set()
+    out: set[str] = set()
+    for v in values:
+        if isinstance(v, str):
+            normalized = _normalize_email(v)
+            if normalized:
+                out.add(normalized)
+    return out
+
+
+def _resolve_rules_file(path_value: str) -> Path:
+    raw = Path(path_value)
+    if raw.is_absolute():
+        return raw
+    # Resolve relative to webui/ directory.
+    return (Path(__file__).resolve().parents[1] / raw).resolve()
+
+
+def _load_auth_email_rules() -> tuple[set[str], set[str]]:
+    if not AUTH_EMAIL_RULES_FILE:
+        return (set(), set())
+    path = _resolve_rules_file(AUTH_EMAIL_RULES_FILE)
+    if not path.exists():
+        logging.getLogger(__name__).warning(
+            "AUTH_EMAIL_RULES_FILE not found: %s",
+            str(path),
+        )
+        return (set(), set())
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to load AUTH_EMAIL_RULES_FILE %s: %s",
+            str(path),
+            str(exc),
+        )
+        return (set(), set())
+    if not isinstance(data, dict):
+        return (set(), set())
+    allowed = _normalize_email_set(data.get("allowed_emails"))
+    denied = _normalize_email_set(data.get("denied_emails"))
+    return (allowed, denied)
+
+
+AUTH_ALLOWED_EMAILS, AUTH_DENIED_EMAILS = _load_auth_email_rules()
+
+
+def _is_email_allowed(email: Optional[str]) -> bool:
+    normalized = _normalize_email(email)
+    if not normalized:
+        return False
+    if normalized in AUTH_DENIED_EMAILS:
+        return False
+    if normalized in AUTH_ALLOWED_EMAILS:
+        return True
+    if "@" not in normalized:
+        return False
+    domain = normalized.split("@", 1)[1]
+    return domain in AUTH_ALLOWED_DOMAINS
+
+
+def _secure_cookie_enabled(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    return request.headers.get("x-forwarded-proto", "").lower() == "https"
+
+
+def _auth_payload(name: str, email: str) -> dict:
+    return {
+        "name": name,
+        "email": email,
+        "authenticated_at": datetime.now(timezone.utc).isoformat(),
+        "expires_in_seconds": AUTH_STORAGE_MAX_AGE_SECONDS,
+    }
+
+
+def _set_auth_cookie(response: Response, request: Request, email: str) -> None:
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=email,
+        max_age=AUTH_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=_secure_cookie_enabled(request),
+        samesite="lax",
+        path=WEBUI_BASE_PATH or "/",
+    )
+
+
+def _clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=AUTH_COOKIE_NAME,
+        path=WEBUI_BASE_PATH or "/",
+    )
+
+
+def _require_auth_http(request: Request) -> Optional[str]:
+    if not AUTH_REQUIRED:
+        return None
+    email = _normalize_email(request.cookies.get(AUTH_COOKIE_NAME))
+    if not _is_email_allowed(email):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    return email
+
+
+_cors_origins_env = os.getenv(
+    "CORS_ALLOW_ORIGINS",
+    "http://localhost:54312,http://127.0.0.1:54312,https://localhost:54312,https://127.0.0.1:54312",
+)
+ALLOW_ORIGINS = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOW_ORIGINS or ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -285,12 +440,85 @@ async def drain_log_queue(
 
 
 @app.get("/")
+@app.get(with_base("/"))
 def read_root():
-    return {"message": "Welcome to PaperBanana API"}
+    return {"message": "Welcome to PaperBanana API", "base_path": WEBUI_BASE_PATH or "/"}
+
+
+@app.get("/api/auth/config")
+@app.get(with_base("/api/auth/config"))
+def auth_config():
+    return {
+        "auth_required": AUTH_REQUIRED,
+        "google_client_id": GOOGLE_CLIENT_ID if AUTH_REQUIRED else "",
+        "cookie_name": AUTH_COOKIE_NAME,
+        "storage_max_age_seconds": AUTH_STORAGE_MAX_AGE_SECONDS,
+        "auth_email_rules_file": AUTH_EMAIL_RULES_FILE,
+    }
+
+
+@app.get("/api/auth/session")
+@app.get(with_base("/api/auth/session"))
+def auth_session(request: Request):
+    email = _normalize_email(request.cookies.get(AUTH_COOKIE_NAME))
+    if not AUTH_REQUIRED:
+        return {"authenticated": True, "auth_required": False, "email": email}
+    if not _is_email_allowed(email):
+        return {"authenticated": False, "auth_required": True}
+    return {"authenticated": True, "auth_required": True, "email": email}
+
+
+@app.post("/api/auth/google/verify")
+@app.post(with_base("/api/auth/google/verify"))
+def auth_google_verify(payload: GoogleVerifyRequest, request: Request, response: Response):
+    if not AUTH_REQUIRED:
+        return {"ok": True, "auth_required": False}
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID is not configured")
+
+    try:
+        from google.auth.transport import requests as grequests
+        from google.oauth2 import id_token
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"google-auth import failed: {exc}") from exc
+
+    try:
+        claims = id_token.verify_oauth2_token(
+            payload.id_token,
+            grequests.Request(),
+            GOOGLE_CLIENT_ID,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid Google token: {exc}") from exc
+
+    issuer = str(claims.get("iss", ""))
+    if issuer not in {"accounts.google.com", "https://accounts.google.com"}:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token issuer")
+    if not bool(claims.get("email_verified")):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google email is not verified")
+
+    email = _normalize_email(claims.get("email"))
+    name = str(claims.get("name") or claims.get("given_name") or email or "")
+    if not _is_email_allowed(email):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email is not allowed")
+
+    _set_auth_cookie(response, request, email)
+    return {"ok": True, "auth_required": True, "user": _auth_payload(name, email)}
+
+
+@app.post("/api/auth/logout")
+@app.post(with_base("/api/auth/logout"))
+def auth_logout(response: Response):
+    _clear_auth_cookie(response)
+    return {"ok": True}
 
 
 @app.get("/api/test-token")
-async def test_token():
+@app.get(with_base("/api/test-token"))
+async def test_token(request: Request):
+    authed_email = _require_auth_http(request)
+    if authed_email:
+        structlog.get_logger().info("Auth check", email=authed_email)
     """
     PaperBanana VLM → structlog → キュー → トークンパース → コスト計算
     の一連の流れを、軽量プロンプトで疎通確認する。
@@ -390,8 +618,15 @@ async def test_token():
 
 
 @app.websocket("/api/ws/generate")
+@app.websocket(with_base("/api/ws/generate"))
 async def websocket_generate(websocket: WebSocket):
+    ws_email = _normalize_email(websocket.cookies.get(AUTH_COOKIE_NAME))
+    if AUTH_REQUIRED and not _is_email_allowed(ws_email):
+        await websocket.close(code=4401, reason="Authentication required")
+        return
     await websocket.accept()
+    if ws_email:
+        structlog.get_logger().info("WebSocket auth", email=ws_email)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     log_queue: Optional[asyncio.Queue] = None

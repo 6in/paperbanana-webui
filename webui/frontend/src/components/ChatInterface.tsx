@@ -1,12 +1,15 @@
 import { useState } from 'react';
-import { Send, Sparkles, StopCircle, MessageSquarePlus, FlaskConical } from 'lucide-react';
+import { Send, Sparkles, StopCircle, MessageSquarePlus, FlaskConical, LogOut } from 'lucide-react';
 import clsx from 'clsx';
+import Editor from '@monaco-editor/react';
 import type { Message } from '../App';
 
 interface ChatInterfaceProps {
     onGenerate: (prompt: string, vlmType: string, iterations: number, parallelCount: number) => void;
     onAbort?: () => void;
     onNewChat?: () => void;
+    onDebugLogout?: () => void;
+    authEmail?: string;
     onImageClick?: (url: string) => void;
     onSystemLog?: (msg: string) => void;
     isGenerating: boolean;
@@ -14,14 +17,34 @@ interface ChatInterfaceProps {
     setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
 }
 
-export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, onSystemLog, isGenerating, messages, setMessages }: ChatInterfaceProps) {
+export function ChatInterface({
+    onGenerate,
+    onAbort,
+    onNewChat,
+    onDebugLogout,
+    authEmail,
+    onImageClick,
+    onSystemLog,
+    isGenerating,
+    messages,
+    setMessages
+}: ChatInterfaceProps) {
+    const apiPrefix = (import.meta.env.VITE_API_PREFIX || '/paper-banana-webui').replace(/\/+$/, '');
+    const backendOrigin = (() => {
+        const envOrigin = import.meta.env.VITE_BACKEND_ORIGIN as string | undefined;
+        if (envOrigin) return envOrigin.replace(/\/+$/, '');
+        if (window.location.port === '54312') {
+            return `${window.location.protocol}//${window.location.hostname}:54311`;
+        }
+        return window.location.origin;
+    })();
+
     const [prompt, setPrompt] = useState('');
     const [vlmType, setVlmType] = useState('gemini-3-flash-preview');
     const [iterations, setIterations] = useState(3);
     const [parallelCount, setParallelCount] = useState(1);
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
+    const submitPrompt = () => {
         if (!prompt.trim() || isGenerating) return;
 
         // Add user prompt to chat history local state
@@ -41,8 +64,13 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, on
         setPrompt("");
     };
 
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        submitPrompt();
+    };
+
     return (
-        <div className="w-full md:w-[400px] lg:w-[500px] h-full flex flex-col glass rounded-3xl overflow-hidden shadow-2xl transition-all duration-300">
+        <div className="w-full md:w-auto h-full flex flex-col glass rounded-3xl overflow-hidden shadow-2xl transition-all duration-300">
 
             {/* Header */}
             <div className="p-6 border-b border-slate-200/50 bg-white/30 backdrop-blur-md flex justify-between items-center">
@@ -51,15 +79,30 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, on
                         <Sparkles className="w-5 h-5 text-emerald-500" />
                         PaperBanana
                     </h1>
-                    <p className="text-sm text-slate-500 mt-1">Academic Figure Generator</p>
+                    <p className="text-sm text-slate-500 mt-1">
+                        Academic Figure Generator
+                        {authEmail ? ` • ${authEmail}` : ''}
+                    </p>
                 </div>
                 <div className="flex items-center gap-2">
+                    {onDebugLogout && (
+                        <button
+                            onClick={onDebugLogout}
+                            className="p-2 rounded-xl text-slate-500 hover:text-rose-600 bg-white/50 hover:bg-rose-50/80 border border-slate-200/50 shadow-sm transition-all flex items-center gap-2"
+                            title="Debug Logout"
+                        >
+                            <LogOut className="w-4 h-4" />
+                            <span className="text-xs font-medium hidden sm:inline">Log out</span>
+                        </button>
+                    )}
                     <button
                         onClick={async () => {
                             const log = (msg: string) => { onSystemLog?.(msg); console.log(msg); };
                             log("API疎通テスト開始...");
                             try {
-                                const res = await fetch('http://localhost:54311/api/test-token');
+                                const res = await fetch(`${backendOrigin}${apiPrefix}/api/test-token`, {
+                                    credentials: 'include',
+                                });
                                 const data = await res.json();
                                 log(`=== API疎通テスト結果 ===`);
                                 log(`レスポンス: ${data.response_text}`);
@@ -98,7 +141,7 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, on
 
             {/* Settings Panel (Collapsible abstract) */}
             <div className="px-6 py-4 border-b border-slate-200/50 bg-white/10 flex gap-4 text-sm text-slate-600">
-                <div className="flex flex-col gap-1.5 w-1/3">
+                <div className="flex flex-col gap-1.5 w-3/5">
                     <label className="text-[10px] font-semibold tracking-wider text-slate-500 uppercase px-1">Model</label>
                     <select
                         className="w-full bg-white/50 border border-slate-200/50 rounded-lg px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all appearance-none text-center"
@@ -108,24 +151,22 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, on
                     >
                         <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
-                        <option value="gemini-exp-1206">Gemini Exp 1206</option>
-                        <option value="gpt-4o">GPT-4o</option>
-                        <option value="claude-3-5-sonnet">Claude 3.5 Sonnet</option>
                     </select>
                 </div>
-                <div className="flex flex-col gap-1.5 w-1/3">
+                <div className="flex flex-col gap-1.5 w-1/5">
                     <label className="text-[10px] font-semibold tracking-wider text-slate-500 uppercase px-1">Iterate</label>
-                    <input
-                        type="number"
-                        min={1}
-                        max={10}
+                    <select
                         value={iterations}
                         onChange={(e) => setIterations(Number(e.target.value))}
-                        className="w-1/2 ml-auto bg-white/50 border border-slate-200/50 rounded-lg px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all text-right"
+                        className="w-full bg-white/50 border border-slate-200/50 rounded-lg px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all appearance-none text-center"
                         disabled={isGenerating}
-                    />
+                    >
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                    </select>
                 </div>
-                <div className="flex flex-col gap-1.5 w-1/3">
+                <div className="flex flex-col gap-1.5 w-1/5">
                     <label className="text-[10px] font-semibold tracking-wider text-slate-500 uppercase px-1">Parallel</label>
                     <select
                         value={parallelCount}
@@ -186,22 +227,36 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, on
             <div className="p-4 border-t border-slate-200/50 bg-white/30 backdrop-blur-md">
                 <form
                     onSubmit={handleSubmit}
-                    className="relative flex items-end gap-2 bg-white/70 rounded-2xl border border-white p-2 shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/50 transition-all"
+                    className="relative flex flex-col gap-2 bg-white/70 rounded-2xl border border-white p-2 shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/50 transition-all"
                 >
-                    <textarea
-                        className="w-full bg-transparent border-none outline-none resize-none max-h-32 min-h-[44px] py-3 px-3 text-slate-700 placeholder:text-slate-400 text-sm"
-                        placeholder="Type your prompt here... (Shift+Enter to send)"
-                        value={prompt}
-                        onChange={(e) => setPrompt(e.target.value)}
-                        disabled={isGenerating}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && e.shiftKey) {
-                                e.preventDefault();
-                                handleSubmit(e);
-                            }
-                        }}
-                        rows={1}
-                    />
+                    <div className="rounded-xl overflow-hidden border border-slate-200/60 overscroll-contain">
+                        <Editor
+                            height="220px"
+                            defaultLanguage="markdown"
+                            value={prompt}
+                            onChange={(value) => setPrompt(value ?? '')}
+                            options={{
+                                minimap: { enabled: false },
+                                wordWrap: 'on',
+                                lineNumbers: 'on',
+                                lineNumbersMinChars: 3,
+                                fontSize: 13,
+                                scrollBeyondLastLine: false,
+                                tabSize: 2,
+                                automaticLayout: true,
+                                scrollbar: {
+                                    alwaysConsumeMouseWheel: true,
+                                },
+                                padding: { top: 12, bottom: 12 },
+                            }}
+                            theme="vs"
+                            loading="Loading editor..."
+                        />
+                    </div>
+                    <div className="text-[11px] text-slate-500 px-1">
+                        Monaco editor (10 lines). Use Cmd/Ctrl+C/V, multiline editing, and rich cursor operations.
+                    </div>
+                    <div className="flex justify-end">
                     {isGenerating ? (
                         <button
                             type="button"
@@ -216,11 +271,12 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, on
                             type="submit"
                             disabled={!prompt.trim()}
                             className="shrink-0 w-10 h-10 rounded-xl bg-emerald-500 text-white flex items-center justify-center hover:bg-emerald-600 disabled:opacity-50 disabled:hover:bg-emerald-500 transition-colors shadow-sm"
-                            title="Send prompt (Shift+Enter)"
+                            title="Send prompt"
                         >
                             <Send className="w-5 h-5 ml-1" />
                         </button>
                     )}
+                    </div>
                 </form>
             </div>
         </div>

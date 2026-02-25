@@ -1,0 +1,6 @@
+allowed_emails:
+  - allowed.user1@example.co.jp
+  - allowed.user2@example.co.jp
+
+denied_emails:
+  - blocked.user@example.co.jp
