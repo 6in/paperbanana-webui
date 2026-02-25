@@ -11,7 +11,31 @@ export interface Message {
 
 function App() {
   const [isGenerating, setIsGenerating] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [parallelCount, setParallelCount] = useState(1);
+  const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startTimeRef = useRef<number | null>(null);
+  // Single state for logs + costs so each WebSocket message triggers one update (real-time display)
+  const [streamState, setStreamState] = useState<{
+    logs: Record<number, string[]>;
+    costs: Record<number, number>;
+    durationSeconds: number | null;
+  }>({ logs: {}, costs: {}, durationSeconds: null });
+  const pipelineLogs = streamState.logs;
+  const costs = streamState.costs;
+  const durationSeconds = streamState.durationSeconds;
+  const setPipelineLogs = (updater: React.SetStateAction<Record<number, string[]>>) => {
+    setStreamState(prev => ({
+      ...prev,
+      logs: typeof updater === 'function' ? updater(prev.logs) : updater,
+    }));
+  };
+  const setCosts = (updater: React.SetStateAction<Record<number, number>>) => {
+    setStreamState(prev => ({
+      ...prev,
+      costs: typeof updater === 'function' ? updater(prev.costs) : updater,
+    }));
+  };
   // Store all currently generated URLs for the active generation
   const [activeImageUrls, setActiveImageUrls] = useState<string[]>([]);
 
@@ -30,11 +54,33 @@ function App() {
     };
   }, []);
 
+  const startTimer = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    startTimeRef.current = performance.now();
+    setElapsedSeconds(0);
+    timerRef.current = setInterval(() => {
+      if (startTimeRef.current != null) {
+        setElapsedSeconds(Math.floor((performance.now() - startTimeRef.current) / 1000));
+      }
+    }, 1000);
+  };
+
+  const stopTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (startTimeRef.current != null) {
+      setElapsedSeconds(Math.round((performance.now() - startTimeRef.current) / 1000));
+    }
+  };
+
   const handleGenerate = (prompt: string, vlmType: string, iterations: number, parallelCount: number = 1) => {
-    // Reset generation state, but DO NOT CLEAR messages or run_id
     setIsGenerating(true);
-    setLogs([]);
+    setStreamState({ logs: {}, costs: {}, durationSeconds: null });
+    setParallelCount(parallelCount);
     setActiveImageUrls([]);
+    startTimer();
 
     // In a real app, this URL might need to be dynamic or use an environment variable
     const wsUrl = `ws://localhost:54311/api/ws/generate`;
@@ -53,7 +99,7 @@ function App() {
           continueRunId: currentRunId
         };
         ws.send(JSON.stringify(config));
-        setLogs(prev => [...prev, "Connected to generator engine..."]);
+        setPipelineLogs(prev => ({ ...prev, [-1]: [...(prev[-1] ?? []), "Connected to generator engine..."] }));
       };
 
       ws.onmessage = (event) => {
@@ -61,7 +107,17 @@ function App() {
           const data = JSON.parse(event.data);
           // If logs or partial completion
           if (data.type === 'log') {
-            setLogs(prev => [...prev, data.message]);
+            const idx: number = data.pipelineIdx ?? -1;
+            setStreamState(prev => ({
+              logs: {
+                ...prev.logs,
+                [idx]: [...(prev.logs[idx] ?? []), data.message],
+              },
+              costs:
+                data.cost_usd !== undefined
+                  ? { ...prev.costs, [idx]: data.cost_usd }
+                  : prev.costs,
+            }));
           } else if (data.type === 'partial_complete' || data.type === 'complete') {
             if (data.image_url) {
               setActiveImageUrls(prev => [...prev, data.image_url]);
@@ -79,17 +135,22 @@ function App() {
                 return newMsgs;
               });
             }
+            if (data.duration_seconds != null) {
+              setStreamState(prev => ({ ...prev, durationSeconds: data.duration_seconds }));
+            }
 
             if (data.type === 'complete') {
-              // Save run_id for future iterations so AI remembers the context
-              if (data.run_id) {
-                setCurrentRunId(data.run_id);
+              if (data.run_id) setCurrentRunId(data.run_id);
+              if (data.duration_seconds != null) {
+                setStreamState(prev => ({ ...prev, durationSeconds: data.duration_seconds }));
               }
+              stopTimer();
               setIsGenerating(false);
               ws.close();
             }
           } else if (data.type === 'error') {
-            setLogs(prev => [...prev, `Error: ${data.message}`]);
+            setPipelineLogs(prev => ({ ...prev, [-1]: [...(prev[-1] ?? []), `Error: ${data.message}`] }));
+            stopTimer();
             setIsGenerating(false);
             ws.close();
           }
@@ -100,7 +161,10 @@ function App() {
 
       ws.onerror = (error) => {
         console.error("WebSocket Error:", error);
-        setLogs(prev => [...prev, "Connection error occurred. Check backend logs."]);
+        setPipelineLogs(prev => ({
+          ...prev,
+          [-1]: [...(prev[-1] ?? []), "Connection error occurred. Check backend logs."]
+        }));
         setIsGenerating(false);
       };
 
@@ -110,7 +174,7 @@ function App() {
 
     } catch (err) {
       console.error(err);
-      setLogs(prev => [...prev, "Failed to connect to backend engine."]);
+      setPipelineLogs(prev => ({ ...prev, [-1]: [...(prev[-1] ?? []), "Failed to connect to backend engine."] }));
       setIsGenerating(false);
     }
   };
@@ -118,8 +182,9 @@ function App() {
   const handleAbort = () => {
     if (wsRef.current) {
       wsRef.current.close();
-      setLogs(prev => [...prev, "Generation aborted by user."]);
+      setPipelineLogs(prev => ({ ...prev, [-1]: [...(prev[-1] ?? []), "Generation aborted by user."] }));
     }
+    stopTimer();
     setIsGenerating(false);
   };
 
@@ -127,8 +192,9 @@ function App() {
     handleAbort();
     setMessages([]);
     setCurrentRunId(null);
-    setLogs([]);
+    setStreamState({ logs: {}, costs: {}, durationSeconds: null });
     setActiveImageUrls([]);
+    setElapsedSeconds(null);
   };
 
   return (
@@ -138,14 +204,18 @@ function App() {
         onAbort={handleAbort}
         onNewChat={handleNewChat}
         onImageClick={(url) => setActiveImageUrls([url])}
+        onSystemLog={(msg) => setPipelineLogs(prev => ({ ...prev, [-1]: [...(prev[-1] ?? []), msg] }))}
         isGenerating={isGenerating}
         messages={messages}
         setMessages={setMessages}
       />
       <PreviewArea
         isGenerating={isGenerating}
-        logs={logs}
-        // If we have any images, preview the first one locally
+        pipelineLogs={pipelineLogs}
+        costs={costs}
+        parallelCount={parallelCount}
+        durationSeconds={durationSeconds}
+        elapsedSeconds={elapsedSeconds}
         imageUrl={activeImageUrls.length > 0 ? activeImageUrls[0] : null}
       />
     </div>

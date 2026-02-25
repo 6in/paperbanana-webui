@@ -56,7 +56,7 @@ source venv/bin/activate  # (Windowsの場合は `venv\Scripts\activate`)
 
 # 3. 依存ライブラリのインストール
 # (公式PaperBananaエンジンを開発モードでインストール + FastAPI/WebSocket)
-pip install -e ../../paperbanana/paperbanana
+pip install -e ../../paperbanana
 pip install fastapi uvicorn websockets python-dotenv
 
 # 4. サーバーの起動 (ポート 54311)

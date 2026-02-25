@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Send, Sparkles, StopCircle, MessageSquarePlus } from 'lucide-react';
+import { Send, Sparkles, StopCircle, MessageSquarePlus, FlaskConical } from 'lucide-react';
 import clsx from 'clsx';
 import type { Message } from '../App';
 
@@ -8,14 +8,15 @@ interface ChatInterfaceProps {
     onAbort?: () => void;
     onNewChat?: () => void;
     onImageClick?: (url: string) => void;
+    onSystemLog?: (msg: string) => void;
     isGenerating: boolean;
     messages: Message[];
     setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
 }
 
-export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, isGenerating, messages, setMessages }: ChatInterfaceProps) {
+export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, onSystemLog, isGenerating, messages, setMessages }: ChatInterfaceProps) {
     const [prompt, setPrompt] = useState('');
-    const [vlmType, setVlmType] = useState('gemini-3-pro-preview');
+    const [vlmType, setVlmType] = useState('gemini-3-flash-preview');
     const [iterations, setIterations] = useState(3);
     const [parallelCount, setParallelCount] = useState(1);
 
@@ -52,17 +53,47 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, is
                     </h1>
                     <p className="text-sm text-slate-500 mt-1">Academic Figure Generator</p>
                 </div>
-                {onNewChat && (
+                <div className="flex items-center gap-2">
                     <button
-                        onClick={onNewChat}
+                        onClick={async () => {
+                            const log = (msg: string) => { onSystemLog?.(msg); console.log(msg); };
+                            log("API疎通テスト開始...");
+                            try {
+                                const res = await fetch('http://localhost:54311/api/test-token');
+                                const data = await res.json();
+                                log(`=== API疎通テスト結果 ===`);
+                                log(`レスポンス: ${data.response_text}`);
+                                log(`ログ行数: ${data.total_log_lines}`);
+                                log(`入力トークン: ${data.total_input_tokens}`);
+                                log(`出力トークン: ${data.total_output_tokens}`);
+                                log(`コスト: $${data.cost_usd}`);
+                                log(`レート: input=$${data.cost_rates?.input_per_1M}/1M, output=$${data.cost_rates?.output_per_1M}/1M`);
+                                (data.log_details || []).forEach((d: any, i: number) => {
+                                    log(`[${i}] override=${d.usage_override ?? 'null'} in=${d.parsed_input ?? 'null'} out=${d.parsed_output ?? 'null'} | ${d.message}`);
+                                });
+                            } catch (e: any) {
+                                log(`疎通テスト失敗: ${e.message}`);
+                            }
+                        }}
                         disabled={isGenerating}
-                        className="p-2 rounded-xl text-slate-500 hover:text-emerald-600 bg-white/50 hover:bg-white/80 border border-slate-200/50 shadow-sm transition-all flex items-center gap-2 disabled:opacity-50"
-                        title="Start New Chat"
+                        className="p-2 rounded-xl text-slate-500 hover:text-amber-600 bg-white/50 hover:bg-amber-50/80 border border-slate-200/50 shadow-sm transition-all flex items-center gap-2 disabled:opacity-50"
+                        title="API疎通テスト（トークン取得確認）"
                     >
-                        <MessageSquarePlus className="w-4 h-4" />
-                        <span className="text-xs font-medium hidden sm:inline">New Chat</span>
+                        <FlaskConical className="w-4 h-4" />
+                        <span className="text-xs font-medium hidden sm:inline">API疎通</span>
                     </button>
-                )}
+                    {onNewChat && (
+                        <button
+                            onClick={onNewChat}
+                            disabled={isGenerating}
+                            className="p-2 rounded-xl text-slate-500 hover:text-emerald-600 bg-white/50 hover:bg-white/80 border border-slate-200/50 shadow-sm transition-all flex items-center gap-2 disabled:opacity-50"
+                            title="Start New Chat"
+                        >
+                            <MessageSquarePlus className="w-4 h-4" />
+                            <span className="text-xs font-medium hidden sm:inline">New Chat</span>
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* Settings Panel (Collapsible abstract) */}
@@ -75,6 +106,7 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, is
                         onChange={e => setVlmType(e.target.value)}
                         disabled={isGenerating}
                     >
+                        <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                         <option value="gemini-exp-1206">Gemini Exp 1206</option>
                         <option value="gpt-4o">GPT-4o</option>
@@ -89,7 +121,7 @@ export function ChatInterface({ onGenerate, onAbort, onNewChat, onImageClick, is
                         max={10}
                         value={iterations}
                         onChange={(e) => setIterations(Number(e.target.value))}
-                        className="w-full bg-white/50 border border-slate-200/50 rounded-lg px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all"
+                        className="w-1/2 ml-auto bg-white/50 border border-slate-200/50 rounded-lg px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all text-right"
                         disabled={isGenerating}
                     />
                 </div>
