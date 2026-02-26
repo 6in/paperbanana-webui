@@ -362,6 +362,7 @@ async def drain_log_queue(
     log_queue: asyncio.Queue,
     model_name: str,
     stop_sentinel: object,
+    cost_snapshot: Optional[dict[int, float]] = None,
     _original_stdout=None,
 ) -> None:
     """
@@ -412,8 +413,10 @@ async def drain_log_queue(
             )
             tokens_tally[pipeline_idx]["cost"] = cost
             cost_usd = tokens_tally[pipeline_idx]["cost"]
+            if cost_snapshot is not None:
+                cost_snapshot[pipeline_idx] = cost_usd
 
-            _out.write(f"[drain#{msg_count}] idx={pipeline_idx} cost={cost_usd:.6f} msg={msg[:80]}\n")
+            _out.write(f"[drain#{msg_count}] idx={pipeline_idx} cost={cost_usd:.6f} msg={msg[:1000]}\n")
             _out.flush()
 
             try:
@@ -621,16 +624,17 @@ async def test_token(request: Request):
 @app.websocket(with_base("/api/ws/generate"))
 async def websocket_generate(websocket: WebSocket):
     ws_email = _normalize_email(websocket.cookies.get(AUTH_COOKIE_NAME))
+    log_email = ws_email or "anyone@anyone.com"
     if AUTH_REQUIRED and not _is_email_allowed(ws_email):
         await websocket.close(code=4401, reason="Authentication required")
         return
     await websocket.accept()
-    if ws_email:
-        structlog.get_logger().info("WebSocket auth", email=ws_email)
+    structlog.get_logger().info("WebSocket auth", email=log_email)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     log_queue: Optional[asyncio.Queue] = None
     drain_task: Optional[asyncio.Task] = None
+    pipeline_costs: dict[int, float] = {}
     stop_sentinel = object()
 
     try:
@@ -642,6 +646,16 @@ async def websocket_generate(websocket: WebSocket):
         iterations = int(config.get("iterations", 3))
         parallel_count = int(config.get("parallelCount", 1))
         continue_run_id = config.get("continueRunId")
+        prompt_preview = (prompt or "").replace("\r\n", "\n").replace("\n", "\\n")[:1000]
+        structlog.get_logger().info(
+            "Generation request received",
+            email=log_email,
+            prompt_length=len(prompt or ""),
+            prompt_preview=prompt_preview,
+            model=vlm_type,
+            iterations=iterations,
+            parallel_count=parallel_count,
+        )
 
         configure_logging(verbose=True)
 
@@ -670,7 +684,14 @@ async def websocket_generate(websocket: WebSocket):
         sys.stderr = redirector
 
         drain_task = asyncio.create_task(
-            drain_log_queue(websocket, log_queue, vlm_type, stop_sentinel, _original_stdout=original_stdout)
+            drain_log_queue(
+                websocket,
+                log_queue,
+                vlm_type,
+                stop_sentinel,
+                cost_snapshot=pipeline_costs,
+                _original_stdout=original_stdout,
+            )
         )
 
         vlm_provider_mapped = (
@@ -749,10 +770,19 @@ async def websocket_generate(websocket: WebSocket):
         first_success_id = next(
             (r for r in results if not isinstance(r, Exception)), None
         )
+        total_cost_usd = round(sum(pipeline_costs.values()), 6)
+        structlog.get_logger().info(
+            "Generation finished",
+            email=log_email,
+            run_id=first_success_id,
+            total_duration_seconds=total_duration_seconds,
+            total_cost_usd=total_cost_usd,
+        )
         await websocket.send_json({
             "type": "complete",
             "run_id": first_success_id,
             "duration_seconds": total_duration_seconds,
+            "total_cost_usd": total_cost_usd,
         })
 
     except WebSocketDisconnect:

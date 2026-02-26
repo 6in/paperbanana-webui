@@ -28,6 +28,45 @@ export function PreviewArea({ isGenerating, pipelineLogs, costs, parallelCount, 
     // Per-pipeline logs
     const getPipelineLogs = (i: number) => pipelineLogs[i] ?? [];
 
+    const estimateProgressPercent = (logs: string[]): number => {
+        if (logs.length === 0) return isGenerating ? 2 : 0;
+        let progress = 5;
+        let maxIterations = 1;
+        let seenIterationCount = 0;
+
+        for (const line of logs) {
+            if (line.includes('Phase 1: Retrieval')) progress = Math.max(progress, 12);
+            if (line.includes('Phase 1: Planning')) progress = Math.max(progress, 22);
+            if (line.includes('Phase 1: Styling')) progress = Math.max(progress, 32);
+
+            const iterMatch = line.match(/Phase 2: Iteration\s+(\d+)(?:\/(\d+))?/i);
+            if (iterMatch) {
+                const iterIdx = Number(iterMatch[1] || '1');
+                const iterTotal = Number(iterMatch[2] || String(maxIterations));
+                maxIterations = Math.max(maxIterations, iterTotal || 1);
+                seenIterationCount = Math.max(seenIterationCount, iterIdx);
+                progress = Math.max(progress, 35 + ((iterIdx - 1) / Math.max(maxIterations, 1)) * 45);
+            }
+
+            if (line.includes('Generating diagram image')) {
+                const ratio = seenIterationCount > 0 ? seenIterationCount / Math.max(maxIterations, 1) : 0.2;
+                progress = Math.max(progress, 45 + ratio * 35);
+            }
+            if (line.includes('Running critic agent')) {
+                const ratio = seenIterationCount > 0 ? seenIterationCount / Math.max(maxIterations, 1) : 0.2;
+                progress = Math.max(progress, 55 + ratio * 35);
+            }
+            if (line.includes('Generation complete') || line.includes('Total generation time')) {
+                progress = 100;
+            }
+        }
+
+        if (!isGenerating) {
+            return Math.min(100, Math.max(progress, logs.length > 0 ? 100 : 0));
+        }
+        return Math.min(99, Math.max(2, progress));
+    };
+
     const dataURIToBlob = (dataURI: string): Blob => {
         const splitStr = dataURI.split(',');
         const base64Data = splitStr[1];
@@ -158,18 +197,28 @@ export function PreviewArea({ isGenerating, pipelineLogs, costs, parallelCount, 
                                 const hasPipeline = i < parallelCount;
                                 const panelLogs = getPipelineLogs(i);
                                 const panelCost = costs[i] ?? 0;
+                                const progressPercent = estimateProgressPercent(panelLogs);
                                 return (
                                     <div
                                         key={i}
                                         className={clsx(
-                                            "flex flex-col overflow-hidden rounded-lg border border-slate-200/50 bg-white/30 min-h-0",
+                                            "relative flex flex-col overflow-hidden rounded-lg border border-slate-200/50 bg-white/30 min-h-0",
                                             !hasPipeline && "opacity-50 border-dashed"
                                         )}
                                     >
                                         {hasPipeline && (
+                                            <div
+                                                className="absolute inset-y-0 left-0 pointer-events-none bg-emerald-300/20 transition-all duration-500"
+                                                style={{ width: `${progressPercent}%` }}
+                                            />
+                                        )}
+                                        {hasPipeline && (
                                             <>
                                                 <div className="shrink-0 px-3 py-1.5 bg-white/40 border-b border-slate-200/30 text-[10px] font-semibold text-slate-500 tracking-wider uppercase flex items-center gap-1.5 flex-wrap">
                                                     <span>🧠</span> Agent {i + 1}
+                                                    <span className="text-[10px] font-bold text-emerald-700/90 bg-emerald-100/60 px-1.5 py-0.5 rounded-sm">
+                                                        {Math.round(progressPercent)}%
+                                                    </span>
                                                     <span className="ml-auto text-emerald-600/90 font-bold bg-emerald-100/40 px-1.5 py-0.5 rounded-sm transition-all duration-300">
                                                         💸 ${(panelCost || 0).toFixed(6)}
                                                     </span>
