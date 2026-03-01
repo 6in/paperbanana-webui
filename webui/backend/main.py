@@ -710,6 +710,8 @@ async def websocket_generate(websocket: WebSocket):
             settings = Settings(
                 vlm_provider=vlm_provider_mapped,
                 vlm_model=vlm_type,
+                image_provider="google_imagen",
+                image_model="gemini-3.1-flash-image-preview",
                 max_iterations=iterations,
                 refinement_iterations=iterations,
                 output_dir="webui_outputs",
